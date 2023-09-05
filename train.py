@@ -15,7 +15,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123
 $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
-
+import datetime
 import os
 import time
 import math
@@ -49,12 +49,12 @@ eval_interval = 100
 log_interval = 10
 eval_iters = 200
 eval_only = False  # if True, script exits right after the first eval
-always_save_checkpoint = False #True  # if True, always save a checkpoint after each eval
+always_save_checkpoint = False  # True  # if True, always save a checkpoint after each eval
 init_from = 'scratch'  # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
-wandb_log = False  # disabled by default
-wandb_project = 'owt'
-wandb_run_name = 'gpt2'  # 'run' + str(time.time())
+wandb_log = True  # disabled by default
+wandb_project = 'cohi'
+wandb_run_name = f'kucoin_{datetime.date.today().isoformat()}'  # 'run' + str(time.time())
 # data
 gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
 batch_size = 64  # if gradient_accumulation_steps > 1, this is the micro-batch size
@@ -65,8 +65,8 @@ n_embd = 768
 dropout = 0.1  # for pretraining 0 is good, for finetuning try 0.1+
 bias = False  # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
-learning_rate = 1e-4  # max learning rate
-max_iters = 600000  # total number of training iterations
+learning_rate = 3e-4  # max learning rate
+max_iters = 100000  # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -74,8 +74,8 @@ grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True  # whether to decay the learning rate
 warmup_iters = 2000  # how many steps to warm up for
-lr_decay_iters = 600000  # should be ~= max_iters per Chinchilla
-min_lr = 1e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+lr_decay_iters = 100000  # should be ~= max_iters per Chinchilla
+min_lr = 3e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl'  # 'nccl', 'gloo', etc.
 # system
@@ -221,7 +221,7 @@ elif init_from == 'resume':
 # if block_size < model.config.block_size:
 #     model.crop_block_size(block_size)
 #     model_args['block_size'] = block_size  # so that the checkpoint will have the right value
-# model.to(device)
+model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float32'))
@@ -250,13 +250,17 @@ def estimate_loss():
     # Put model into evaluation mode
     model.eval()
     for split in ['train', 'val']:
+        fbetas = torch.zeros(eval_iters)
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                logits, loss, fbeta = model(X, Y)
             losses[k] = loss.item()
+            fbetas[k] = fbeta.item()
         out[split] = losses.mean()
+        out[f'{split}_fbeta'] = fbetas.mean()
+
     # Put model back into training mode
     model.train()
     return out
@@ -299,12 +303,15 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f} | "
+              f"train f-beta: {losses['train_fbeta']:.4f}, val f-beta: {losses['val_fbeta']:.4f}")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
+                "train/fbeta": losses[f'train_fbeta'],
+                "val/fbeta": losses[f'val_fbeta'],
                 "lr": lr,
                 "mfu": running_mfu * 100,  # convert to percentage
             })
@@ -336,7 +343,7 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            logits, loss, fbeta = model(X, Y)
             loss = loss / gradient_accumulation_steps  # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
