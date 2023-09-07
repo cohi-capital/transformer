@@ -126,6 +126,18 @@ def generate_pkl():
                 ]
             ].to_numpy(dtype=np.float32)
 
+    training_ct = 0
+    for identifier in dict_train:
+        training_ct += dict_train[identifier].shape[0]
+    training_ct -= len(dict_train) * 168
+
+    val_ct = 0
+    for identifier in dict_validation:
+        val_ct += dict_validation[identifier].shape[0]
+    val_ct -= len(dict_validation) * 168
+
+    print(f"Training samples count: {training_ct} | Validation samples count: {val_ct}")
+
     with open(os.path.join(os.path.dirname(__file__), TRAIN_DATA), 'wb') as f:
         pickle.dump(dict_train, f)
 

@@ -11,7 +11,6 @@ from collections import defaultdict
 from contextlib import nullcontext
 from model import GPTConfig, GPT
 from torchmetrics import FBetaScore
-# from sklearn.metrics import fbeta_score
 # -----------------------------------------------------------------------------
 init_file = 'ckpt.pt'  # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out'  # ignored if init_from is not 'resume'
@@ -80,12 +79,14 @@ def get_data():
             x_single = (x_single - x_min) / (x_max - x_min + eps)
             x_list.append(x_single)
 
-            y_single = torch.tensor(arr_symbol[i + block_size - 1, -1])
+            y_single = torch.from_numpy(arr_symbol[i:i + block_size, -1])
+
             y_list.append(y_single)
 
             if len(x_list) >= batch_size:
                 x = torch.stack(x_list)
-                y = torch.stack(y_list)
+                y = torch.stack(y_list)[:, [-1]]
+                # print(f"Shape of x:{x.shape} | y:{y.shape}")
                 if device_type == 'cuda':
                     # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
                     x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -96,7 +97,7 @@ def get_data():
                 y_list = []
 
     x = torch.stack(x_list)
-    y = torch.stack(y_list)
+    y = torch.stack(y_list)[:, [-1]]
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -111,15 +112,15 @@ def evaluate():
         with ctx:
             f_betas = defaultdict(list)
             for i, (X, Y) in enumerate(get_data()):
-                logits, _ = model(X)
-                logits_flat = logits.view(-1, logits.size(-1))
-                probs = F.sigmoid(logits_flat)
+                logits, _, _ = model(X)
+                logits_sigmoid = F.sigmoid(logits)
+                logits_flat = logits_sigmoid.view(-1, logits_sigmoid.size(-1))
 
                 labels = Y.view(-1, 1)
 
                 for thrs in range(1, 10):
                     f_beta_func = FBetaScore(num_classes=2, beta=beta, threshold=(thrs/10))
-                    fbeta = f_beta_func(probs, labels)
+                    fbeta = f_beta_func(logits_flat, labels)
                     f_betas[thrs].append(fbeta.item())
 
                     if i % 1000 == 0:

@@ -54,19 +54,19 @@ init_from = 'scratch'  # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True  # disabled by default
 wandb_project = 'cohi'
-wandb_run_name = f'kucoin_{datetime.date.today().isoformat()}'  # 'run' + str(time.time())
+wandb_run_name = f'kucoin_{datetime.date.today().isoformat()}_fbeta_surrogate_loss'  # 'run' + str(time.time())
 # data
-gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
-batch_size = 64  # if gradient_accumulation_steps > 1, this is the micro-batch size
+gradient_accumulation_steps = 5 * 4  # used to simulate larger batch sizes
+batch_size = 96  # if gradient_accumulation_steps > 1, this is the micro-batch size
 # model
 n_layer = 12
 n_head = 12
 n_embd = 768
-dropout = 0.1  # for pretraining 0 is good, for finetuning try 0.1+
+dropout = 0.2  # for pretraining 0 is good, for finetuning try 0.1+
 bias = False  # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 3e-4  # max learning rate
-max_iters = 100000  # total number of training iterations
+max_iters = 50000  # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -74,7 +74,7 @@ grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True  # whether to decay the learning rate
 warmup_iters = 2000  # how many steps to warm up for
-lr_decay_iters = 100000  # should be ~= max_iters per Chinchilla
+lr_decay_iters = 50000  # should be ~= max_iters per Chinchilla
 min_lr = 3e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl'  # 'nccl', 'gloo', etc.
@@ -251,15 +251,17 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         fbetas = torch.zeros(eval_iters)
+        bces = torch.zeros(eval_iters)
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, loss, fbeta = model(X, Y)
+                logits, loss, fbeta, bce = model(X, Y)
             losses[k] = loss.item()
             fbetas[k] = fbeta.item()
         out[split] = losses.mean()
         out[f'{split}_fbeta'] = fbetas.mean()
+        out[f'{split}_bce'] = bces.mean()
 
     # Put model back into training mode
     model.train()
@@ -312,6 +314,8 @@ while True:
                 "val/loss": losses['val'],
                 "train/fbeta": losses[f'train_fbeta'],
                 "val/fbeta": losses[f'val_fbeta'],
+                "train/bce": losses[f'train_bce'],
+                "val/bce": losses[f'val_bce'],
                 "lr": lr,
                 "mfu": running_mfu * 100,  # convert to percentage
             })
@@ -343,7 +347,7 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss, fbeta = model(X, Y)
+            logits, loss, fbeta, bce = model(X, Y)
             loss = loss / gradient_accumulation_steps  # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
