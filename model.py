@@ -15,7 +15,73 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from torchmetrics import FBetaScore
+from torchmetrics.classification import BinaryPrecision, BinaryRecall, BinaryFBetaScore, BinaryF1Score
+
+
+class FBetaSurrLoss(nn.Module):
+    def __init__(self, beta=0.025, pct_pos_samples=0.1, epsilon=1e-8, device='cuda'):
+        super(FBetaSurrLoss, self).__init__()
+        self.beta = beta
+        self.p = pct_pos_samples
+        self.epsilon = epsilon
+        self.device = device
+
+    def forward(self, logits, labels):
+        # Ensure the predictions are in the same range as label (e.g., [0, 1])
+        preds = torch.softmax(logits, dim=1)
+
+        labels_inv = torch.sub(torch.ones(labels.shape, device=self.device), labels)
+        labels = torch.cat((labels.unsqueeze(dim=2), labels_inv.unsqueeze(dim=2)), dim=-1)
+
+        pos_term = -labels * torch.log(preds + self.epsilon)
+        neg_term = (1 - labels) * torch.log((self.beta ** 2 * (self.p / (1 - self.p))) + preds + self.epsilon)
+
+        loss = pos_term + neg_term
+        return loss.mean()
+
+
+class FBetaSoft(nn.Module):
+    def __init__(self, beta=0.025, epsilon=1e-8):
+        super(FBetaSoft, self).__init__()
+        self.beta = beta
+        self.epsilon = epsilon
+
+    def forward(self, preds, labels):
+        tp = preds * labels
+        fp = preds * (1-labels)
+        fn = (1-preds) * labels
+
+        precision = tp / (tp + fp + self.epsilon)
+        recall = tp / (tp + fn + self.epsilon)
+
+        fbeta = ((1 + self.beta**2) * precision * recall) / (self.beta**2 * precision + recall + self.epsilon)
+        return 1 - fbeta.mean()
+
+
+class FBetaBCE(nn.Module):
+    def __init__(self, pos_weight, beta, epsilon=1e-8, alpha=0.5):
+        super(FBetaBCE, self).__init__()
+        self.pos_weight = pos_weight
+        self.beta = beta
+        self.epsilon = epsilon
+        self.alpha = alpha
+
+    def forward(self, logits, labels):
+        preds = F.sigmoid(logits)
+
+        tp = (preds * labels).sum(dim=0)
+        fp = (preds * (1-labels)).sum(dim=0)
+        fn = ((1-preds) * labels).sum(dim=0)
+
+        precision = tp / (tp + fp + self.epsilon)
+        recall = tp / (tp + fn + self.epsilon)
+
+        fbeta = ((1 + self.beta**2) * precision * recall) / (self.beta**2 * precision + recall + self.epsilon)
+        fbeta_loss = 1 - fbeta
+
+        bce_loss = F.binary_cross_entropy_with_logits(logits, labels, pos_weight=self.pos_weight)
+
+        return 2 * (self.alpha * bce_loss + (1 - self.alpha) * fbeta_loss)
 
 
 class LayerNorm(nn.Module):
@@ -123,16 +189,20 @@ class GPTConfig:
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.0
-    pos_weight: float = 40.0
-    bias: bool = False  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    pos_weight: float = 10.0
+    bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    eps: float = 1e-8
+    beta: float = 0.025
+    classification_threshold: float = 0.5
+    device: str = 'cuda'
 
 
 class GPT(nn.Module):
-
     def __init__(self, config):
         super().__init__()
         assert config.output_size is not None
         assert config.block_size is not None
+        assert config.device is not None
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
@@ -140,14 +210,28 @@ class GPT(nn.Module):
             wpe=nn.Embedding(config.block_size, config.n_embd),
             drop=nn.Dropout(config.dropout),
             h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f=LayerNorm(config.n_embd, bias=config.bias),
+            ln_f=LayerNorm(config.n_embd, bias=config.bias)
         ))
-        self.logit_head = nn.Linear(config.n_embd, config.output_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.output_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
         # self.transformer.wte.weight = self.logit_head.weight  # https://paperswithcode.com/method/weight-tying
+
+        self.f_beta_func = BinaryFBetaScore(
+            beta=self.config.beta,
+            threshold=self.config.classification_threshold
+        ).to(self.config.device)
+        self.f_beta_func_0025 = BinaryFBetaScore(
+            beta=0.025,
+            threshold=self.config.classification_threshold
+        )
+        self.f_beta_func_1 = BinaryF1Score(threshold=self.config.classification_threshold).to(self.config.device)
+        self.precision_func = BinaryPrecision(threshold=self.config.classification_threshold).to(self.config.device)
+        self.recall_func = BinaryRecall(threshold=self.config.classification_threshold).to(self.config.device)
+
+        self.pos_weight = torch.tensor(self.config.pos_weight).to(self.config.device)
 
         # init all weights
         self.apply(self._init_weights)
@@ -194,30 +278,36 @@ class GPT(nn.Module):
         x = self.transformer.ln_f(x)
 
         if targets is not None:
+            metrics = dict()
             # if we are given some desired targets also calculate the loss
-            logits = self.logit_head(x)
-            logits_flat = logits.view(-1, logits.size(-1))
+            # note: using list [-1] to preserve the time dim
+            # -1 to only look at the last label
+            logits = self.lm_head(x)  # [:, [-1], :]
+            logits_flat = logits[:, -1].view(-1)
+            targets_flat = targets[:, -1]
 
-            targets_flat = targets.view(-1, 1)
+            loss = F.binary_cross_entropy_with_logits(
+                logits_flat,
+                targets_flat,
+                pos_weight=self.pos_weight
+            )
 
-            f_beta_func = FBetaScore(task="binary", num_classes=2, beta=0.025, threshold=0.5).to(device)
-            fbeta = f_beta_func(logits_flat, targets_flat)
+            metrics[f'fbeta_{self.config.beta}'] = self.f_beta_func(logits_flat, targets_flat).item()
+            metrics[f'fbeta_0.025'] = self.f_beta_func_0025(logits_flat, targets_flat).item()
+            metrics[f'f1'] = self.f_beta_func_1(logits_flat, targets_flat).item()
+            metrics['precision'] = self.precision_func(logits_flat, targets_flat).item()
+            metrics['recall'] = self.recall_func(logits_flat, targets_flat).item()
+            metrics['bce'] = loss.item()
 
-            pos_weight = torch.tensor([self.config.pos_weight]).to(device)
-            criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-            loss = criterion(logits_flat, targets_flat)
-            # targets_flat = targets.repeat_interleave(self.config.input_vector_size, dim=1).view(-1)
-            # targets_flat_inv = torch.sub(torch.ones(targets_flat.shape), targets_flat)
-            # targets_cross_entropy = torch.cat((targets_flat.unsqueeze(dim=1), targets_flat_inv.unsqueeze(dim=1)), dim=-1)
-            # loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets_cross_entropy, ignore_index=-1)
+            # criterion = FBetaBCE(pos_weight=self.pos_weight, beta=self.config.beta, epsilon=self.config.eps)
+            # loss = criterion(logits_flat, targets_flat)
         else:
             # inference-time mini-optimization: only forward the logit_head on the very last position
-            logits = self.logit_head(x[:, [-1], :])  # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(x)  # note: using list [-1] to preserve the time dim
             loss = None
-            fbeta = None
+            metrics = dict()
 
-        return logits, loss, fbeta
+        return logits, loss, metrics
 
     # def crop_block_size(self, block_size):
     #     # model surgery to decrease the block size if necessary

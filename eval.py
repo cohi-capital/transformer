@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from collections import defaultdict
 from contextlib import nullcontext
 from model import GPTConfig, GPT
-from torchmetrics import FBetaScore
+from torchmetrics.classification import BinaryFBetaScore
 # -----------------------------------------------------------------------------
 init_file = 'ckpt.pt'  # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out'  # ignored if init_from is not 'resume'
@@ -110,23 +110,27 @@ def evaluate():
     # run evaluation
     with torch.no_grad():
         with ctx:
-            f_betas = defaultdict(list)
+            f_betas = list()  # defaultdict(list)
             for i, (X, Y) in enumerate(get_data()):
+                print(f'X:{X.shape}, Y:{Y.shape}')
                 logits, _, _ = model(X)
-                logits_sigmoid = F.sigmoid(logits)
-                logits_flat = logits_sigmoid.view(-1, logits_sigmoid.size(-1))
+                logits_flat = logits.view(-1, logits.size(-1))
 
-                labels = Y.view(-1, 1)
+                targets_flat = Y.view(-1, 1)
 
-                for thrs in range(1, 10):
-                    f_beta_func = FBetaScore(num_classes=2, beta=beta, threshold=(thrs/10))
-                    fbeta = f_beta_func(logits_flat, labels)
-                    f_betas[thrs].append(fbeta.item())
+                # for thrs in range(1, 10):
+                f_beta_func = BinaryFBetaScore(
+                    beta=beta,
+                    threshold=threshold
+                ).to(device)
+                fbeta = f_beta_func(logits_flat, targets_flat)
+                f_betas.append(fbeta.item())
 
-                    if i % 1000 == 0:
-                        print(f'{i}: f_beta @ {thrs} = {statistics.mean(f_betas[thrs])}')
-            for thrs in range(1, 10):
-                print(f'final f_beta @ {thrs} = {statistics.mean(f_betas[thrs])}')
+                if i % 1000 == 0:
+                    print(f'{i}: f_beta = {statistics.mean(f_betas)}')
+
+            # for thrs in range(1, 10):
+            print(f'final f_beta = {statistics.mean(f_betas)}')
 
 
 if __name__ == "__main__":
