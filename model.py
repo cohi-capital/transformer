@@ -59,9 +59,10 @@ class FBetaSoft(nn.Module):
 
 
 class FBetaBCE(nn.Module):
-    def __init__(self, pos_weight, beta, epsilon=1e-8, alpha=0.5):
+    def __init__(self, pos_weight, weight=None, beta=1, epsilon=1e-8, alpha=0.5):
         super(FBetaBCE, self).__init__()
         self.pos_weight = pos_weight
+        self.weight = weight
         self.beta = beta
         self.epsilon = epsilon
         self.alpha = alpha
@@ -79,7 +80,9 @@ class FBetaBCE(nn.Module):
         fbeta = ((1 + self.beta**2) * precision * recall) / (self.beta**2 * precision + recall + self.epsilon)
         fbeta_loss = 1 - fbeta
 
-        bce_loss = F.binary_cross_entropy_with_logits(logits, labels, pos_weight=self.pos_weight)
+        bce_loss = F.binary_cross_entropy_with_logits(
+            logits, labels, weight=self.weight, pos_weight=self.pos_weight
+        )
 
         return 2 * (self.alpha * bce_loss + (1 - self.alpha) * fbeta_loss)
 
@@ -182,6 +185,7 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
+    batch_size: int = 256
     block_size: int = 24
     output_size: int = 1
     input_vector_size: int = 10
@@ -190,6 +194,7 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     pos_weight: float = 10.0
+    last_weight: int = 10
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     eps: float = 1e-8
     beta: float = 0.025
@@ -232,6 +237,16 @@ class GPT(nn.Module):
         self.recall_func = BinaryRecall(threshold=self.config.classification_threshold).to(self.config.device)
 
         self.pos_weight = torch.tensor(self.config.pos_weight).to(self.config.device)
+
+        self.time_step_weight = torch.ones(self.config.batch_size, self.config.block_size)
+        self.time_step_weight[:, -1] *= self.config.last_weight
+        self.time_step_weight = self.time_step_weight.view(-1, 1).to(self.config.device)
+
+        self.f_beta_bce = FBetaBCE(
+            pos_weight=self.pos_weight,
+            weight=self.time_step_weight,
+            beta=self.config.beta
+        )
 
         # init all weights
         self.apply(self._init_weights)
@@ -283,27 +298,36 @@ class GPT(nn.Module):
             # note: using list [-1] to preserve the time dim
             # -1 to only look at the last label
             logits = self.lm_head(x)  # [:, [-1], :]
-            logits_flat = logits[:, -1].view(-1)
-            targets_flat = targets[:, -1]
+            logits_flat = logits.view(-1, logits.size(-1))
+            targets_flat = targets.view(-1, 1)  # [:, [-1]]
+            # Use the following to only focus on the last time step
+            logits_flat_last = logits[:, -1].view(-1)
+            targets_flat_last = targets[:, -1]
 
-            loss = F.binary_cross_entropy_with_logits(
-                logits_flat,
-                targets_flat,
+            # loss = F.binary_cross_entropy_with_logits(
+            #     logits_flat,
+            #     targets_flat,
+            #     weight=self.time_step_weight,
+            #     pos_weight=self.pos_weight
+            # )
+            loss = self.f_beta_bce(logits_flat, targets_flat)
+
+            metrics[f'fbeta_{self.config.beta}'] = self.f_beta_func(logits_flat_last, targets_flat_last).item()
+            metrics[f'fbeta_0.025'] = self.f_beta_func_0025(logits_flat_last, targets_flat_last).item()
+            metrics[f'f1'] = self.f_beta_func_1(logits_flat_last, targets_flat_last).item()
+            metrics['precision'] = self.precision_func(logits_flat_last, targets_flat_last).item()
+            metrics['recall'] = self.recall_func(logits_flat_last, targets_flat_last).item()
+            metrics['bce'] = F.binary_cross_entropy_with_logits(
+                logits_flat_last,
+                targets_flat_last,
                 pos_weight=self.pos_weight
-            )
-
-            metrics[f'fbeta_{self.config.beta}'] = self.f_beta_func(logits_flat, targets_flat).item()
-            metrics[f'fbeta_0.025'] = self.f_beta_func_0025(logits_flat, targets_flat).item()
-            metrics[f'f1'] = self.f_beta_func_1(logits_flat, targets_flat).item()
-            metrics['precision'] = self.precision_func(logits_flat, targets_flat).item()
-            metrics['recall'] = self.recall_func(logits_flat, targets_flat).item()
-            metrics['bce'] = loss.item()
+            ).item()
 
             # criterion = FBetaBCE(pos_weight=self.pos_weight, beta=self.config.beta, epsilon=self.config.eps)
             # loss = criterion(logits_flat, targets_flat)
         else:
             # inference-time mini-optimization: only forward the logit_head on the very last position
-            logits = self.lm_head(x)  # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(x[:, [-1], :])  # note: using list [-1] to preserve the time dim
             loss = None
             metrics = dict()
 

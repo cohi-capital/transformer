@@ -20,7 +20,7 @@ from datetime import datetime
 DAYS_IN_WEEK = 7
 HOURS_IN_DAY = 24
 N_SPLITS = 10
-BLOCK_SIZE = DAYS_IN_WEEK * HOURS_IN_DAY  # 24 * 7, 1 week
+BLOCK_SIZE = 3 * HOURS_IN_DAY  # 24 * 3, 3 days
 EPS = 1e-8
 LOG_EPS = 1
 
@@ -28,12 +28,13 @@ WEEKLY_DECAY = 1
 TARGET_POS_SAMPLE_RATIO = 0.5  # 0.08 - 1
 
 MARKET_DATA_FILTERED_CCXT_KUCOIN_20230812 = 'market_data_filtered_kucoin_ccxt_only_20230101_20230812.parquet.nosync'
-TRAIN_DATA = f'train_balance0{TARGET_POS_SAMPLE_RATIO*10}_decay{WEEKLY_DECAY}.pkl'
-VALIDATION_DATA = f'val.pkl'
-METADATA = f'meta_balance0{TARGET_POS_SAMPLE_RATIO*10:.1f}_decay{WEEKLY_DECAY}.pkl'
 
 
 def generate_pkl(data_type='train'):
+    train_data = f'train_balance0{int(TARGET_POS_SAMPLE_RATIO * 10)}_decay{WEEKLY_DECAY}_block{BLOCK_SIZE}.pkl'
+    validation_data = f'val_block{BLOCK_SIZE}.pkl'
+    metadata = f'meta_{data_type}_balance0{int(TARGET_POS_SAMPLE_RATIO * 10)}_decay{WEEKLY_DECAY}_block{BLOCK_SIZE}.pkl'
+
     # Add bitcoin information to each row
     df_base = pd.read_parquet(MARKET_DATA_FILTERED_CCXT_KUCOIN_20230812)
 
@@ -131,6 +132,7 @@ def generate_pkl(data_type='train'):
             df_train['include'] = df_train['include'] & (df_train['decay'] >= df_train['rand2'])
 
             # Do not consider last BLOCK_SIZE indices for training so we can have full training blocks.
+            # df_train['include'] = True
             mask_batch_size = [True if i > len(df_train) - BLOCK_SIZE else False for i in range(len(df_train))]
             df_train.loc[mask_batch_size, 'include'] = False
 
@@ -209,11 +211,11 @@ def generate_pkl(data_type='train'):
                 # neg_samples += BLOCK_SIZE - val_tensor[:, -1].count_nonzero().values
 
     if data_type == 'train':
-        with open(os.path.join(os.path.dirname(__file__), TRAIN_DATA), 'wb') as f:
+        with open(os.path.join(os.path.dirname(__file__), train_data), 'wb') as f:
             pickle.dump(train_list, f)
 
     if data_type == 'val':
-        with open(os.path.join(os.path.dirname(__file__), VALIDATION_DATA), 'wb') as f:
+        with open(os.path.join(os.path.dirname(__file__), validation_data), 'wb') as f:
             pickle.dump(val_list, f)
 
     # Save the meta information as well to help us determine parameters later
@@ -229,7 +231,7 @@ def generate_pkl(data_type='train'):
     }
     print(meta)
 
-    with open(os.path.join(os.path.dirname(__file__), f'{METADATA}_{data_type}'), 'wb') as f:
+    with open(os.path.join(os.path.dirname(__file__), f'{metadata}'), 'wb') as f:
         pickle.dump(meta, f)
 
 

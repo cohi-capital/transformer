@@ -31,12 +31,13 @@ from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 # Variables set by Cohi
 dataset = 'ccxt_kucoin_ohlcv_20230101_20230812'
-train_filename = 'train_full_decay1.pkl'
-val_filename = 'val.pkl'
+train_filename = 'train_balance01_decay1_block72.pkl'
+val_filename = 'val_block72.pkl'
 seed = 421
 input_vector_size = 10
-block_size = 168
-pos_weight = 10
+block_size = 72
+pos_weight = 11.4
+last_weight = 10
 # block_size = input_vector_size * context_hrs
 eps = 1e-8
 log_eps = 1.0
@@ -56,34 +57,35 @@ init_from = 'scratch'  # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True  # disabled by default
 wandb_project = 'cohi'
-wandb_run_name = f'kucoin_bce_undersampled_{datetime.datetime.utcnow().strftime("%Y%m%d%H%M%S")}'  # 'run' + str(time.time())
 # data
-gradient_accumulation_steps = 5 * 2  # used to simulate larger batch sizes
-batch_size = 256  # if gradient_accumulation_steps > 1, this is the micro-batch size
+gradient_accumulation_steps = 1  # used to simulate larger batch sizes
+batch_size = 7680  # if gradient_accumulation_steps > 1, this is the micro-batch size
 # model
-n_layer = 12
-n_head = 12
-n_embd = 768
+n_layer = 4
+n_head = 4
+n_embd = 256
 dropout = 0.0  # for pretraining 0 is good, for finetuning try 0.1+
 bias = True  # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
-learning_rate = 3e-4  # max learning rate
-max_iters = 100000  # total number of training iterations
+learning_rate = 5e-4  # max learning rate
+max_iters = 5000  # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True  # whether to decay the learning rate
-warmup_iters = 2000  # how many steps to warm up for
-lr_decay_iters = 100000  # should be ~= max_iters per Chinchilla
-min_lr = 3e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+warmup_iters = 1000  # how many steps to warm up for
+lr_decay_iters = 5000  # should be ~= max_iters per Chinchilla
+min_lr = 1e-4  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl'  # 'nccl', 'gloo', etc.
 # system
 device = 'cuda'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float32'  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True  # use PyTorch 2.0 to compile the model to be faster
+wandb_run_name = (f'model_small_window_{block_size}_label_last_{last_weight}x'
+                 f'_balance_full_decay_1_lr_{learning_rate:0e}_fbeta0.1_bce')
 # -----------------------------------------------------------------------------
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read())  # overrides from command line or config file
@@ -171,11 +173,13 @@ model_args = dict(
     n_layer=n_layer,
     n_head=n_head,
     n_embd=n_embd,
+    batch_size=batch_size,
     block_size=block_size,
     bias=bias,
     dropout=dropout,
     input_vector_size=input_vector_size,
     pos_weight=pos_weight,
+    last_weight=last_weight,
     eps=eps,
     beta=beta,
     classification_threshold=classification_threshold,
