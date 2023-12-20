@@ -11,4 +11,5 @@ input.txt
 *.nosync
 *.icloud
 *.parquet
-
+wandb/
+out/

@@ -19,15 +19,15 @@ from datetime import datetime
 
 DAYS_IN_WEEK = 7
 HOURS_IN_DAY = 24
-N_SPLITS = 10
+N_SPLITS = 15
 BLOCK_SIZE = 3 * HOURS_IN_DAY  # 24 * 3, 3 days
 EPS = 1e-8
 LOG_EPS = 1
 
-WEEKLY_DECAY = 0.8
+WEEKLY_DECAY = 1 
 TARGET_POS_SAMPLE_RATIO = 0.0  # 0.08 - 1
 
-MARKET_DATA_FILTERED_CCXT_KUCOIN_20230812 = 'market_data_filtered_kucoin_ccxt_only_20230101_20230812.parquet.nosync'
+MARKET_DATA_FILTERED_CCXT_KUCOIN_20230812 = 'market_data_filtered_kucoin_ccxt_only_20230101_20231218.parquet'
 
 
 def generate_pkl(data_type='train'):

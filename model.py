@@ -59,7 +59,7 @@ class FBetaSoft(nn.Module):
 
 
 class FBetaBCE(nn.Module):
-    def __init__(self, pos_weight, weight=None, beta=1, epsilon=1e-8, alpha=0.5):
+    def __init__(self, pos_weight, weight=None, beta=1, epsilon=1e-8, alpha=0.1):
         super(FBetaBCE, self).__init__()
         self.pos_weight = pos_weight
         self.weight = weight
@@ -69,10 +69,12 @@ class FBetaBCE(nn.Module):
 
     def forward(self, logits, labels):
         preds = F.sigmoid(logits)
+        
+        f_beta_weight = self.weight.clone()
 
-        tp = (preds * labels).sum(dim=0)
-        fp = (preds * (1-labels)).sum(dim=0)
-        fn = ((1-preds) * labels).sum(dim=0)
+        tp = (preds * labels * f_beta_weight).sum(dim=0)
+        fp = (preds * (1-labels) * f_beta_weight).sum(dim=0)
+        fn = ((1-preds) * labels * f_beta_weight).sum(dim=0)
 
         precision = tp / (tp + fp + self.epsilon)
         recall = tp / (tp + fn + self.epsilon)

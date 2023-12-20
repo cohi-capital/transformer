@@ -31,12 +31,12 @@ from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 # Variables set by Cohi
 dataset = 'ccxt_kucoin_ohlcv_20230101_20230812'
-train_filename = 'train_balance01_decay1_block72.pkl'
+train_filename = 'train_balance00_decay08_block72.pkl'
 val_filename = 'val_block72.pkl'
 seed = 421
 input_vector_size = 10
 block_size = 72
-pos_weight = 11.4
+pos_weight = 13.14
 last_weight = 10
 # block_size = input_vector_size * context_hrs
 eps = 1e-8
@@ -85,7 +85,7 @@ device = 'cuda'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float32'  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True  # use PyTorch 2.0 to compile the model to be faster
 wandb_run_name = (f'model_small_window_{block_size}_label_last_{last_weight}x'
-                 f'_balance_full_decay_1_lr_{learning_rate:0e}_fbeta0.1_bce')
+                 f'_balance_full_decay_0.8_lr_{learning_rate:0e}_fbeta_0.1_weight_last_bce_0.1')
 # -----------------------------------------------------------------------------
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read())  # overrides from command line or config file
