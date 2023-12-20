@@ -28,7 +28,7 @@ LOG_EPS = 1
 WEEKLY_DECAY = 1 
 TARGET_POS_SAMPLE_RATIO = 0.0  # 0.08 <= x < 1
 
-MARKET_DATA_FILTERED_CCXT_KUCOIN = 'market_data_filtered_kucoin_ccxt_only_20230101_20231218.parquet'
+MARKET_DATA_FILTERED_CCXT_KUCOIN = 'market_data_filtered_incomplete_ccxt_only_20230101_20231218.parquet'
 
 
 def generate_pkl(data_type='both', block_size=BLOCK_SIZE, weekly_decay=WEEKLY_DECAY,
@@ -52,7 +52,9 @@ def generate_pkl(data_type='both', block_size=BLOCK_SIZE, weekly_decay=WEEKLY_DE
     btc = df_base.loc[df_base['identifier'] == 'kucoin-BTC-USDT'].copy()
     btc.columns = 'btc_' + btc.columns.values
 
+    print(f"{datetime.now()} | Starting merge")
     df_merged = df_base.merge(btc, how="left", left_on="time_open", right_on="btc_time_open")
+    print(f"{datetime.now()} | Finished merge")
 
     df_merged.drop(
         columns=[
@@ -84,8 +86,8 @@ def generate_pkl(data_type='both', block_size=BLOCK_SIZE, weekly_decay=WEEKLY_DE
     cutoff_time = min_date + (time_between * (N_SPLITS - 1) / N_SPLITS)
 
     # Go through symbol by symbol to generate training and validation data
-    train_list = []
-    val_list = []
+    train_size = 0
+    val_size = 0
 
     total_symbols = len(df_merged.identifier.unique())
     start_time = datetime.now()
@@ -97,30 +99,54 @@ def generate_pkl(data_type='both', block_size=BLOCK_SIZE, weekly_decay=WEEKLY_DE
     # one_plus_pos_sample = 0
     # last_pos_sample = 0
 
-    for i, identifier in enumerate(df_merged.identifier.unique()):
+    print(f"{datetime.now()} | Starting loop")
+
+    grouped_identifier = df_merged.groupby('identifier')
+    for i, (identifier, group) in enumerate(grouped_identifier):
         if i % 100 == 0:
             print(f"{datetime.now()}| Elapsed: {datetime.now() - start_time} | "
                   f"Processed {i} of {total_symbols} symbols. | "
-                  f"Train size: {len(train_list):.2f} | Val size: {len(val_list):.2f} | "
+                  f"Train size: {train_size:.2f} | Val size: {val_size:.2f} | "
                   f"Pos ratio: {pos_samples / (pos_samples + neg_samples + EPS)}")
-
-        tmp = df_merged.loc[df_merged['identifier'] == identifier].copy()
+        ts_copy = datetime.now()        
+        tmp = group.copy()
+        ts_sort = datetime.now()
+        # print(f"Copy duration: {ts_sort - ts_copy}")
         tmp.sort_values(['time_open'], inplace=True)
+        ts_timestamp = datetime.now()
+        # print(f"Sort duration: {ts_timestamp - ts_sort}")
 
         # Convert unix timestamp back to pandas Timestamp
         tmp['time_open'] = tmp['time_open'].apply(lambda ts: pd.Timestamp(ts, unit='ms'))
+        ts_index = datetime.now()
+        # print(f"Timestamp conversion duration: {ts_index - ts_timestamp}")
 
         tmp.set_index('time_open', inplace=True, drop=True)
+        ts_duplicates = datetime.now()
+        # print(f"Index duration: {ts_duplicates - ts_index}")
+
+
         tmp.drop_duplicates(inplace=True)
+        ts_label = datetime.now()
+        # print(f"Drop duplicates duration: {ts_label - ts_duplicates}")
+
 
         tmp['price_close_next_24H_max'] = tmp['price_close'].shift(periods=-24, freq="H").rolling(
             "24H", min_periods=24).max()
         tmp['ror_next_24H_max'] = tmp['price_close_next_24H_max'] / tmp['price_close']
         tmp['y_classification'] = tmp['ror_next_24H_max'].transform(lambda x: 1 if x >= 1.1 else 0)
+        ts_dropna = datetime.now()
+        # print(f"label duration: {ts_dropna - ts_label}")
+
         tmp.dropna(inplace=True)
+        ts_df_split = datetime.now()
+        # print(f"dropna duration: {ts_df_split - ts_dropna}")
 
         df_train = tmp.loc[tmp.index < cutoff_time].copy()
         df_validation = tmp.loc[tmp.index >= cutoff_time].copy()
+        ts_train = datetime.now()
+        # print(f"DF split duration: {ts_train - ts_df_split}")
+
 
         if is_train and (len(df_train) > BLOCK_SIZE):
             # Filter out negative samples to balance classes
@@ -173,6 +199,7 @@ def generate_pkl(data_type='both', block_size=BLOCK_SIZE, weekly_decay=WEEKLY_DE
                 ]
             ]
 
+            identifier_train_list = []
             for starting_idx in starting_indices:
                 block = df_train.iloc[starting_idx:starting_idx + BLOCK_SIZE]
                 label = block['y_classification'][-1]
@@ -185,9 +212,17 @@ def generate_pkl(data_type='both', block_size=BLOCK_SIZE, weekly_decay=WEEKLY_DE
                 x_min = torch.min(train_tensor, dim=0).values
                 x_max = torch.max(train_tensor, dim=0).values
                 train_tensor = (train_tensor - x_min) / (x_max - x_min + EPS)
-                train_list.append(train_tensor)
+
+                identifier_train_list.append(train_tensor)
                 # pos_samples += train_tensor[:, -1].count_nonzero().values
                 # neg_samples += BLOCK_SIZE - train_tensor[:, -1].count_nonzero().values
+
+            with open(f'tensors/train/{identifier}.pkl', 'wb') as f:
+                pickle.dump(identifier_train_list, f)
+            train_size += len(identifier_train_list)
+
+        ts_val = datetime.now()
+        # print(f"Train duration: {ts_val - ts_train}")
 
         if is_val and (len(df_validation) > BLOCK_SIZE):
             df_validation = df_validation[
@@ -206,6 +241,7 @@ def generate_pkl(data_type='both', block_size=BLOCK_SIZE, weekly_decay=WEEKLY_DE
                 ]
             ]
 
+            identifier_val_list = []
             for starting_idx in range(len(df_validation) - BLOCK_SIZE):
                 block = df_validation.iloc[starting_idx:starting_idx + BLOCK_SIZE]
                 label = block['y_classification'][-1]
@@ -218,23 +254,28 @@ def generate_pkl(data_type='both', block_size=BLOCK_SIZE, weekly_decay=WEEKLY_DE
                 x_min = torch.min(val_tensor, dim=0).values
                 x_max = torch.max(val_tensor, dim=0).values
                 val_tensor = (val_tensor - x_min) / (x_max - x_min + EPS)
-                val_list.append(val_tensor)
+                identifier_val_list.append(val_tensor)
 
+            with open(f'tensors/val/{identifier}.pkl', 'wb') as f:
+                pickle.dump(identifier_val_list, f)
+            val_size += len(identifier_val_list)
                 # pos_samples += val_tensor[:, -1].count_nonzero().values
                 # neg_samples += BLOCK_SIZE - val_tensor[:, -1].count_nonzero().values
 
-    if is_train:
-        with open(os.path.join(os.path.dirname(__file__), train_data_path), 'wb') as f:
-            pickle.dump(train_list, f)
+        # print(f"Val duration: {datetime.now() - ts_val}")
 
-    if is_val:
-        with open(os.path.join(os.path.dirname(__file__), validation_data_path), 'wb') as f:
-            pickle.dump(val_list, f)
+    # if is_train:
+    #     with open(os.path.join(os.path.dirname(__file__), train_data_path), 'wb') as f:
+    #         pickle.dump(train_list, f)
+
+    # if is_val:
+    #     with open(os.path.join(os.path.dirname(__file__), validation_data_path), 'wb') as f:
+    #         pickle.dump(val_list, f)
 
     # Save the meta information as well to help us determine parameters later
     meta = {
-        'train_size': len(train_list),
-        'val_size': len(val_list),
+        'train_size': train_size,
+        'val_size': val_size,
         'pos_size': pos_samples,
         'neg_size': neg_samples,
         'pos_ratio': pos_samples / (pos_samples + neg_samples),
@@ -250,7 +291,7 @@ def generate_pkl(data_type='both', block_size=BLOCK_SIZE, weekly_decay=WEEKLY_DE
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dtype', type=str)
+    parser.add_argument('--dtype', type=str, default='both')
     args = parser.parse_args()
 
     generate_pkl(args.dtype)

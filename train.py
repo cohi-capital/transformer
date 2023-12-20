@@ -16,23 +16,26 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
 import datetime
+import glob
 import os
 import time
 import math
 import pickle
 import random
+import sys
 import torch
 
 from contextlib import nullcontext
+from pathlib import Path
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 # Variables set by Cohi
-dataset = 'ccxt_kucoin_ohlcv_20230101_20230812'
-train_filename = 'train_balance00_decay08_block72.pkl'
-val_filename = 'val_block72.pkl'
+dataset = 'ccxt_kucoin_ohlcv_20230101_20231218'
+train_filename = 'train_block_72.pkl'
+val_filename = 'val_block_72.pkl'
 seed = 421
 input_vector_size = 10
 block_size = 72
@@ -55,28 +58,28 @@ eval_only = False  # if True, script exits right after the first eval
 always_save_checkpoint = False  # True  # if True, always save a checkpoint after each eval
 init_from = 'scratch'  # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
-wandb_log = True  # disabled by default
+wandb_log = True
 wandb_project = 'cohi'
 # data
-gradient_accumulation_steps = 1  # used to simulate larger batch sizes
-batch_size = 7680  # if gradient_accumulation_steps > 1, this is the micro-batch size
+gradient_accumulation_steps = 10  # used to simulate larger batch sizes
+batch_size = 256  # if gradient_accumulation_steps > 1, this is the micro-batch size
 # model
-n_layer = 4
-n_head = 4
-n_embd = 256
+n_layer = 12
+n_head = 12
+n_embd = 768
 dropout = 0.0  # for pretraining 0 is good, for finetuning try 0.1+
 bias = True  # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
-learning_rate = 5e-4  # max learning rate
-max_iters = 5000  # total number of training iterations
+learning_rate = 3e-4  # max learning rate
+max_iters = 30000  # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True  # whether to decay the learning rate
-warmup_iters = 1000  # how many steps to warm up for
-lr_decay_iters = 5000  # should be ~= max_iters per Chinchilla
+warmup_iters = 2000  # how many steps to warm up for
+lr_decay_iters = 30000  # should be ~= max_iters per Chinchilla
 min_lr = 1e-4  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl'  # 'nccl', 'gloo', etc.
@@ -84,8 +87,9 @@ backend = 'nccl'  # 'nccl', 'gloo', etc.
 device = 'cuda'  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float32'  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True  # use PyTorch 2.0 to compile the model to be faster
-wandb_run_name = (f'model_small_window_{block_size}_label_last_{last_weight}x'
-                 f'_balance_full_decay_0.8_lr_{learning_rate:0e}_fbeta_0.1_weight_last_bce_0.1')
+wandb_run_name = (f'dataset_{dataset}_model_large_window_{block_size}_label_last_{last_weight}x'
+                  f'_balance_full_decay_1_lr_{learning_rate:0e}_lr_decay_iters_{lr_decay_iters:0e}'
+                  f'_fbeta_{beta}_weight_last_bce_0.1')
 # -----------------------------------------------------------------------------
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read())  # overrides from command line or config file
@@ -134,6 +138,19 @@ def get_batch_generator(split):
     if split == 'train':
         with open(os.path.join(data_dir, train_filename), 'rb') as f:
             data_list = pickle.load(f)
+        # data_list = []
+        ### Copying a pickle join as a hack to get things working quickly
+        # train_paths = [Path(f) for f in glob.glob(f"{data_dir}/tensors/train/*.pkl")]
+        # print(f"Start training data loading.")
+        # for i, p in enumerate(train_paths):
+        #     with open(p, 'rb') as f:
+        #         if i % 100 == 0:
+        #             print(f'train: {datetime.datetime.now()} | {i} of {len(train_paths)} | '
+        #                   f'size: {sys.getsizeof(data_list)}')
+        #         tensor_list = pickle.load(f)
+        #         data_list.extend(tensor_list)
+        # print(f"Done training data loading.")
+        ### End of hack
     else:
         with open(os.path.join(data_dir, val_filename), 'rb') as f:
             data_list = pickle.load(f)
